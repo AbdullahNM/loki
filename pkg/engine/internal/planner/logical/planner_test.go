@@ -273,6 +273,7 @@ func TestCanExecuteQuery(t *testing.T) {
 		},
 		{
 			statement: `{env="prod"} | regexp ".* foo=(?P<foo>.+) .*"`,
+			expected:  true,
 		},
 		{
 			statement: `{env="prod"} | unpack`,
