@@ -5,6 +5,12 @@ var (
 	StatPipelineRowsOut      = NewStatisticInt64("rows.out", AggregationTypeSum)
 	StatPipelineReadCalls    = NewStatisticInt64("read.calls", AggregationTypeSum)
 	StatPipelineReadDuration = NewStatisticFloat64("read.duration", AggregationTypeSum)
+
+	// Fine-grained pipeline timing statistics.
+	// StatPipelineInputWaitDuration tracks time spent waiting on input.Read() calls (child nodes / I/O).
+	StatPipelineInputWaitDuration = NewStatisticFloat64("input.wait.duration", AggregationTypeSum)
+	// StatPipelineExecDuration tracks time spent on local computation (excludes waiting on children).
+	StatPipelineExecDuration = NewStatisticFloat64("exec.duration", AggregationTypeSum)
 )
 
 // ColumnCompat statistics.
@@ -70,4 +76,15 @@ var (
 	StatMetastoreStreamsReadTime         = NewStatisticFloat64("metastore.sections.streams.read.duration", AggregationTypeSum)
 	StatMetastoreSectionPointersRead     = NewStatisticInt64("metastore.sections.pointers.read", AggregationTypeSum)
 	StatMetastoreSectionPointersReadTime = NewStatisticFloat64("metastore.sections.pointers.read.duration", AggregationTypeSum)
+)
+
+// Task scheduling statistics (per query/workflow).
+var (
+	// Task assignment duration (queue to assignment) - in seconds.
+	StatTaskAssignmentDurationAvg = NewStatisticFloat64("task.assignment.duration.avg", AggregationTypeSum)
+	StatTaskAssignmentDurationMax = NewStatisticFloat64("task.assignment.duration.max", AggregationTypeMax)
+
+	// Task execution duration (assignment to completion) - in seconds.
+	StatTaskExecutionDurationAvg = NewStatisticFloat64("task.execution.duration.avg", AggregationTypeSum)
+	StatTaskExecutionDurationMax = NewStatisticFloat64("task.execution.duration.max", AggregationTypeMax)
 )

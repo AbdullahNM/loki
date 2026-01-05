@@ -181,12 +181,13 @@ func (e *Engine) Execute(ctx context.Context, params logql.Params) (logqlmodel.R
 		region.SetStatus(codes.Error, "failed to create execution plan")
 		return logqlmodel.Result{}, ErrPlanningFailed
 	}
-	defer wf.Close()
+	// NOTE: wf.Close() is handled in the background goroutine below, not via defer.
 
 	pipeline, err := wf.Run(ctx)
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to execute query", "err", err)
 
+		wf.Close()
 		e.metrics.subqueries.WithLabelValues(statusFailure).Inc()
 		region.SetStatus(codes.Error, "failed to execute query")
 		return logqlmodel.Result{}, ErrSchedulingFailed
@@ -195,6 +196,7 @@ func (e *Engine) Execute(ctx context.Context, params logql.Params) (logqlmodel.R
 
 	builder, durExecution, err := e.collectResult(ctx, logger, params, pipeline)
 	if err != nil {
+		wf.Close()
 		e.metrics.subqueries.WithLabelValues(statusFailure).Inc()
 		region.SetStatus(codes.Error, "error during query execution")
 		return logqlmodel.Result{}, err
@@ -218,21 +220,33 @@ func (e *Engine) Execute(ctx context.Context, params logql.Params) (logqlmodel.R
 
 	region.SetStatus(codes.Ok, "")
 
-	// explicitly call End() before exporting even though we have a defer above.
-	// It is safe to call End() multiple times.
-	region.End()
-	capture.End()
-	if err := mergeCapture(capture, physicalPlan, region); err != nil {
-		level.Warn(logger).Log("msg", "failed to merge capture", "err", err)
-		// continue export even if merging fails. Spans from the tasks
-		// would still appear as siblings in the trace right below the Engine.Execute.
-	}
+	// Finalize capture and export traces in background goroutine.
+	// This gives tasks a grace period to report their captures without
+	// blocking the Execute call.
+	go func() {
+		// Phase 1: Wait for natural completion (tasks report their status)
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 1*time.Second)
+		_ = wf.WaitForCompletion(waitCtx)
+		waitCancel()
 
-	xcap.ExportTrace(ctx, capture, logger)
-	logValues = append(logValues, xcap.SummaryLogValues(capture)...)
-	level.Info(logger).Log(
-		logValues...,
-	)
+		wf.Close()
+
+		// Now safe to finalize capture - all task captures have been merged.
+		region.End()
+		capture.End()
+
+		if err := mergeCapture(capture, physicalPlan, region); err != nil {
+			level.Warn(logger).Log("msg", "failed to merge capture", "err", err)
+			// continue export even if merging fails. Spans from the tasks
+			// would still appear as siblings in the trace right below the Engine.Execute.
+		}
+
+		xcap.ExportTrace(ctx, capture, logger)
+		logValues = append(logValues, xcap.SummaryLogValues(capture)...)
+		level.Info(logger).Log(
+			logValues...,
+		)
+	}()
 
 	// TODO: capture and report queue time
 	md := metadata.FromContext(ctx)

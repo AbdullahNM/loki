@@ -22,6 +22,7 @@ import (
 
 	"github.com/grafana/loki/v3/pkg/engine/internal/scheduler/wire"
 	"github.com/grafana/loki/v3/pkg/engine/internal/workflow"
+	"github.com/grafana/loki/v3/pkg/xcap"
 )
 
 // Config holds configuration options for [Scheduler].
@@ -258,7 +259,14 @@ func (s *Scheduler) handleTaskStatus(ctx context.Context, worker *workerConn, ms
 		if task.status.State == workflow.TaskStateCompleted {
 			// The execution time of the task is the duration from when it was
 			// first assigned to when we received the completion status.
-			s.metrics.taskExecSeconds.Observe(time.Since(task.assignTime).Seconds())
+			executionDuration := time.Since(task.assignTime).Seconds()
+			s.metrics.taskExecSeconds.Observe(executionDuration)
+
+			// Record execution duration observations to scheduler region if available.
+			if task.schedulerRegion != nil {
+				task.schedulerRegion.Record(xcap.StatTaskExecutionDurationAvg.Observe(executionDuration))
+				task.schedulerRegion.Record(xcap.StatTaskExecutionDurationMax.Observe(executionDuration))
+			}
 		}
 
 		// Notify the handler about the change.
@@ -496,7 +504,14 @@ func (s *Scheduler) finalizeAssignment(ctx context.Context, t *task, worker *wor
 
 		worker.Assign(t)
 		t.assignTime = time.Now()
-		s.metrics.taskQueueSeconds.Observe(t.assignTime.Sub(t.queueTime).Seconds())
+		assignmentDuration := t.assignTime.Sub(t.queueTime).Seconds()
+		s.metrics.taskQueueSeconds.Observe(assignmentDuration)
+
+		// Record assignment duration observations to scheduler region if available.
+		if t.schedulerRegion != nil {
+			t.schedulerRegion.Record(xcap.StatTaskAssignmentDurationAvg.Observe(assignmentDuration))
+			t.schedulerRegion.Record(xcap.StatTaskAssignmentDurationMax.Observe(assignmentDuration))
+		}
 
 		// Reconcile stream states: send updates for any that changed while sending.
 		for streamID, sentState := range sentStates {
@@ -848,6 +863,10 @@ func (s *Scheduler) Start(ctx context.Context, tasks ...*workflow.Task) error {
 		return err
 	}
 
+	// Extract scheduler region from context. The region is created once per workflow
+	// in dispatchTasks() and passed through context to all Start() calls.
+	schedulerRegion := xcap.RegionFromContext(ctx)
+
 	// Extract trace context from the query context and add it to each task's metadata.
 	var tc propagation.TraceContext
 	metadata := make(http.Header)
@@ -859,6 +878,8 @@ func (s *Scheduler) Start(ctx context.Context, tasks ...*workflow.Task) error {
 		}
 
 		maps.Copy(t.metadata, metadata)
+		// Store scheduler region reference in task for later use in recording observations.
+		t.schedulerRegion = schedulerRegion
 	}
 
 	// We set markPending *after* enqueueTasks to give tasks an opportunity to

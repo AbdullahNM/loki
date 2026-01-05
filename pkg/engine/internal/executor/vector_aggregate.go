@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -79,13 +80,16 @@ func (v *vectorAggregationPipeline) Read(ctx context.Context) (arrow.RecordBatch
 }
 
 func (v *vectorAggregationPipeline) read(ctx context.Context) (arrow.RecordBatch, error) {
+	readStart := time.Now()
+	inputTimer := &inputTimer{}
+
 	v.aggregator.Reset() // reset before reading new inputs
 	inputsExhausted := false
 	for !inputsExhausted {
 		inputsExhausted = true
 
 		for _, input := range v.inputs {
-			record, err := input.Read(ctx)
+			record, err := inputTimer.ReadFrom(ctx, input)
 			if err != nil {
 				if errors.Is(err, EOF) {
 					continue
@@ -197,8 +201,18 @@ func (v *vectorAggregationPipeline) read(ctx context.Context) (arrow.RecordBatch
 	}
 
 	v.inputsExhausted = true
+	result, err := v.aggregator.BuildRecord()
 
-	return v.aggregator.BuildRecord()
+	// Record fine-grained timing stats
+	if v.region != nil {
+		totalDuration := time.Since(readStart)
+		execDuration := totalDuration - inputTimer.Duration()
+
+		v.region.Record(xcap.StatPipelineInputWaitDuration.Observe(inputTimer.Duration().Seconds()))
+		v.region.Record(xcap.StatPipelineExecDuration.Observe(execDuration.Seconds()))
+	}
+
+	return result, err
 }
 
 // Close closes the resources of the pipeline.

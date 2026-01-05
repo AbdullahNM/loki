@@ -13,6 +13,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/grafana/loki/v3/pkg/engine/internal/executor"
 	"github.com/grafana/loki/v3/pkg/engine/internal/planner/physical"
@@ -72,6 +73,13 @@ type Workflow struct {
 	streamStates map[*Stream]StreamState
 
 	admissionControl *admissionControl
+
+	// completionMut protects completedCount and completionChan.
+	completionMut sync.Mutex
+	// completedCount tracks how many tasks have reached a terminal state.
+	completedCount int
+	// completionChan is closed when all tasks have reached a terminal state.
+	completionChan chan struct{}
 }
 
 // New creates a new Workflow from a physical plan. New returns an error if the
@@ -101,6 +109,8 @@ func New(opts Options, logger log.Logger, tenantID string, runner Runner, plan *
 
 		taskStates:   make(map[*Task]TaskState),
 		streamStates: make(map[*Stream]StreamState),
+
+		completionChan: make(chan struct{}),
 	}
 	if err := wf.init(context.Background()); err != nil {
 		wf.Close()
@@ -151,6 +161,17 @@ func (wf *Workflow) Close() {
 	}
 }
 
+// WaitForCompletion blocks until all tasks in the workflow have reached a
+// terminal state (Completed, Cancelled, or Failed), or the context is cancelled.
+func (wf *Workflow) WaitForCompletion(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-wf.completionChan:
+		return nil
+	}
+}
+
 // Run executes the workflow, returning a pipeline to read results from. The
 // provided context is used for the lifetime of the workflow execution.
 //
@@ -190,6 +211,15 @@ func (wf *Workflow) dispatchTasks(ctx context.Context, tasks []*Task) error {
 		int64(wf.opts.MaxRunningScanTasks),
 		int64(wf.opts.MaxRunningOtherTasks),
 	)
+
+	// Create scheduler region once per workflow for recording scheduler-level observations.
+	// This region will be shared across all Start() calls for this workflow.
+	if wf.capture != nil {
+		ctx, _ = xcap.StartRegion(ctx, "scheduler",
+			xcap.WithRegionAttributes(
+				attribute.String("component", "scheduler"),
+			))
+	}
 
 	groups := wf.admissionControl.groupByType(tasks)
 	for _, taskType := range []taskType{
@@ -323,6 +353,19 @@ func (wf *Workflow) handleTerminalStateChange(ctx context.Context, task *Task, o
 
 	if newStatus.Statistics != nil {
 		wf.mergeResults(*newStatus.Statistics)
+	}
+
+	// Signal completion AFTER merging capture and statistics.
+	// Only count tasks that are transitioning TO a terminal state for the first time.
+	if !oldState.Terminal() {
+		wf.completionMut.Lock()
+		wf.completedCount++
+		allComplete := wf.completedCount == len(wf.manifest.Tasks)
+		wf.completionMut.Unlock()
+
+		if allComplete {
+			close(wf.completionChan)
+		}
 	}
 
 	// task reached a terminal state. We need to detect if task's immediate

@@ -124,6 +124,9 @@ func (r *rangeAggregationPipeline) Read(ctx context.Context) (arrow.RecordBatch,
 // - Use columnar access pattern. Current approach is row-based which does not benefit from the storage format.
 // - Add toggle to return partial results on Read() call instead of returning only after exhausting all inputs.
 func (r *rangeAggregationPipeline) read(ctx context.Context) (arrow.RecordBatch, error) {
+	readStart := time.Now()
+	inputTimer := &inputTimer{}
+
 	var (
 		tsColumnExpr = &physical.ColumnExpr{
 			Ref: types.ColumnRef{
@@ -146,7 +149,7 @@ func (r *rangeAggregationPipeline) read(ctx context.Context) (arrow.RecordBatch,
 		inputsExhausted = true
 
 		for _, input := range r.inputs {
-			record, err := input.Read(ctx)
+			record, err := inputTimer.ReadFrom(ctx, input)
 			if err != nil {
 				if errors.Is(err, EOF) {
 					continue
@@ -272,7 +275,18 @@ func (r *rangeAggregationPipeline) read(ctx context.Context) (arrow.RecordBatch,
 	}
 
 	r.inputsExhausted = true
-	return r.aggregator.BuildRecord()
+	result, err := r.aggregator.BuildRecord()
+
+	// Record fine-grained timing stats
+	if r.region != nil {
+		totalDuration := time.Since(readStart)
+		execDuration := totalDuration - inputTimer.Duration()
+
+		r.region.Record(xcap.StatPipelineInputWaitDuration.Observe(inputTimer.Duration().Seconds()))
+		r.region.Record(xcap.StatPipelineExecDuration.Observe(execDuration.Seconds()))
+	}
+
+	return result, err
 }
 
 // Close closes the resources of the pipeline.

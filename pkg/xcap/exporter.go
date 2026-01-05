@@ -195,5 +195,27 @@ func summarizeObservations(capture *Capture) *observations {
 			normalizeKeys(),
 	)
 
+	// RangeAggregation timing stats
+	result.merge(
+		collect.fromRegions("RangeAggregation", false).
+			filter(
+				StatPipelineInputWaitDuration.Key(),
+				StatPipelineExecDuration.Key(),
+			).
+			prefix("range_agg_").
+			normalizeKeys(),
+	)
+
+	// VectorAggregation timing stats
+	result.merge(
+		collect.fromRegions("VectorAggregation", false).
+			filter(
+				StatPipelineInputWaitDuration.Key(),
+				StatPipelineExecDuration.Key(),
+			).
+			prefix("vector_agg_").
+			normalizeKeys(),
+	)
+
 	return result
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/grafana/loki/v3/pkg/engine/internal/workflow"
+	"github.com/grafana/loki/v3/pkg/xcap"
 )
 
 // task wraps a [workflow.Task] with its handler.
@@ -24,6 +25,11 @@ type task struct {
 
 	owner  *workerConn
 	status workflow.TaskStatus
+
+	// schedulerRegion is the xcap region for recording scheduler-level observations
+	// for this task's workflow. It is set when the task is started if a capture
+	// is available in the context.
+	schedulerRegion *xcap.Region
 }
 
 var validTaskTransitions = map[workflow.TaskState][]workflow.TaskState{
